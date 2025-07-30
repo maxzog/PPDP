@@ -45,6 +45,22 @@ mutable struct ChnlPart<:Particle
     ang::ThreeVec{Float64}
 end
 
+mutable struct ChnlPartEns<:Particle
+    # 64 bit integers
+    id::Int64
+    id0::Int64
+
+    # 32 bit integers
+    grp::Int32
+
+    # 32 bit floats
+    d::Float32
+    coltime::Float32
+    pos::ThreeVec{Float32}
+    vel::ThreeVec{Float32}
+    fld::ThreeVec{Float32}
+end
+
 function read_particles(fn::String, ::Type{ChnlPartFull})
     # Open the binary file
     io = open(fn, "r")
@@ -53,8 +69,6 @@ function read_particles(fn::String, ::Type{ChnlPartFull})
     header = Vector{Int32}(undef, 2)
     read!(io, header)
     np, size = header[1], header[2]
-    println("Npart :: ", np)
-    println("Size  :: ", size)
 
     # Initialize the particle array
     ps = Vector{ChnlPartFull}(undef, np)
@@ -145,8 +159,6 @@ function read_particles(fn::String, ::Type{ChnlPart})
     header = Vector{Int32}(undef, 2)
     read!(io, header)
     np, size = header[1], header[2]
-    println("Npart :: ", np)
-    println("Size  :: ", size)
 
     # Initialize the particle array
     ps = Vector{ChnlPart}(undef, np)
@@ -208,9 +220,28 @@ function read_particles(fn::String, ::Type{ChnlPart})
     # Close the file and return the particle array
     close(io)
 
-    assign_Tgroups!(ps)
+    assign_groups!(ps)
 
     return ps
+end
+
+function read_particles(dir::String, step::Int64, ::Type{ChnlPartEns})
+    suf = "."*"0"^(6-length(string(step)))*string(step)
+    np = get_npart(dir*"/particle"*suf)
+    X  = read_pos(dir*"/particle"*suf, np)
+    U  = read_arr(dir*"/fld"*suf, np)
+    V  = read_arr(dir*"/vel"*suf, np)
+    ids= read_vec(dir*"/id"*suf, np)
+    id0s= read_vec(dir*"/id0"*suf, np)
+    ds = read_vec(dir*"/dp"*suf, np)
+    cs = read_vec(dir*"/coltime"*suf, np)
+    ps = Vector{ChnlPartEns}(undef, np)
+    for i in 1:np
+       ps[i] = ChnlPartEns(trunc(Int64, ids[i]), trunc(Int64, id0s[i]), -1, ds[i], cs[i], X[:,i], V[:,i], U[:,i])
+    end
+    perm = sortperm([p.id0 for p in ps])
+    assign_groups!(ps)
+    return ps[perm]
 end
 
 # Assign group number to particle based on diameter
@@ -232,6 +263,67 @@ end
 
 #######################################
 ###
+### Ensight file reading (particles)
+###
+#######################################
+
+function get_npart(fn::String)::Int32
+    """
+    Reads the ensight particle.****** files to get the number of particles
+    There's probably a more elegant way to do this but hey this works 
+    """
+    if split(split(fn, '.')[end-1], '/')[end] != "particle"
+        print(fn)
+        error("[get_npart] Not the correct file for reading npart")
+        return 
+    end
+    io = open(fn)
+    skip(io, 240)
+    n = Vector{Int32}(undef, 1)
+    read!(io, n); close(io)
+    return n[1]
+end
+
+function read_pos(fn::String, n::Int32)::Array{Float32}
+    """
+    Reads ensight particle geometry files
+    outputs (3, npart) array of position data
+    """
+    arr = Array{Float32}(undef, (3, n))
+    io = open(fn, "r")
+    skip(io, 244+4*n)
+    read!(io, arr)
+    close(io); return arr
+end
+
+function read_vec(fn::String, n::Int32)::Vector{Float32}
+    """
+    Reads ensight particle data files and outputs a vector of particle scalar data
+    The header size can vary (as far as I can tell) so read the particle.****** file first using get_npart()
+    to determine how much to skip in the data file
+    """
+    vec = Vector{Float32}(undef, n)
+    io = open(fn)
+    skip(io, 80)
+    read!(io, vec); close(io)
+    return vec
+end
+
+function read_arr(fn::String, n::Int32)::Array{Float32}
+    """
+    Reads ensight particle data files and outputs a (3, npart) array of the vector data
+    The header size can vary (as far as I can tell) so read the particle.****** file first using get_npart()
+    to determine how much to skip in the data file
+    """
+    arr = Array{Float32}(undef, (3, n))
+    io = open(fn)
+    skip(io, 80)
+    read!(io, arr); close(io)
+    return arr
+end
+
+#######################################
+###
 ### Mesh definitions and construction
 ###
 #######################################
@@ -242,11 +334,37 @@ mutable struct Mesh1D{T<:AbstractFloat} <: Mesh
 
     xMin::T
     xMax::T
-    Lx::T
-    dx::T
+    Lx  ::T
+    dx  ::T
 
     centersX::Vector{T}
-    edgesX::Vector{T}
+    edgesX  ::Vector{T}
+end
+
+mutable struct Mesh2D <: Mesh
+    dim::Int64
+
+    nCellsX::Int64
+    nCellsY::Int64
+
+    nEdgesX::Int64
+    nEdgesY::Int64
+
+    xMin::Float64
+    xMax::Float64
+    yMin::Float64
+    yMax::Float64
+
+    Lx::Float64
+    Ly::Float64
+
+    dx::Float64
+    dy::Float64
+
+    centersX::Vector{Float64}
+    edgesX::Vector{Float64}
+    centersY::Vector{Float64}
+    edgesY::Vector{Float64}
 end
 
 mutable struct Mesh3D <: Mesh
@@ -283,16 +401,88 @@ mutable struct Mesh3D <: Mesh
     edgesZ::Vector{Float64}
 end
 
-function mesh(xmin::Float64, xmax::Float64, ncells::Int64)::Mesh1D{Float64}
+mutable struct NonUniformMesh3D <: Mesh
+    dim::Int64
+
+    nCellsX::Int64
+    nCellsY::Int64
+    nCellsZ::Int64
+
+    xMin::Float64
+    xMax::Float64
+    yMin::Float64
+    yMax::Float64
+    zMin::Float64
+    zMax::Float64
+
+    Lx::Float64
+    Ly::Float64
+    Lz::Float64
+
+    dx::Vector{Float64}
+    dy::Vector{Float64}
+    dz::Vector{Float64}
+
+    centersX::Vector{Float64}
+    centersY::Vector{Float64}
+    centersZ::Vector{Float64}
+end
+
+function mesh(xmin::T, xmax::T, ncells::Int64)::Mesh1D{T} where {T <: AbstractFloat}
     @assert(xmin < xmax)
     L = xmax - xmin
     d = L / ncells
     xvcell = LinRange(xmin + d / 2, xmax - d / 2, ncells)
     xvedge = LinRange(xmin, xmax, ncells + 1)
 
-    obj = Mesh1D{Float64}(ncells, ncells + 1, xmin, xmax, L, d, xvcell, xvedge)
+    obj = Mesh1D{T}(ncells, ncells + 1, xmin, xmax, L, d, xvcell, xvedge)
     return obj
 end
+
+function mesh(minCorner::SVector{2,Float64}, maxCorner::SVector{2,Float64}, ncells::SVector{2,Int64})::Mesh2D
+    for i in 1:2
+       @assert(minCorner[i] < maxCorner[i])
+    end
+    Lv = maxCorner .- minCorner
+    dv = Lv ./ ncells
+    xcv = LinRange(minCorner[1] + dv[1] / 2, maxCorner[1] - dv[1] / 2, ncells[1])
+    ycv = LinRange(minCorner[2] + dv[2] / 2, maxCorner[2] - dv[2] / 2, ncells[2])
+    xev = LinRange(minCorner[1], maxCorner[1], ncells[1]+1)
+    yev = LinRange(minCorner[2], maxCorner[2], ncells[2]+1)
+    obj = Mesh2D(3, 
+                 ncells[1], ncells[2],
+                 ncells[1]+1, ncells[2]+1,
+                 minCorner[1], maxCorner[1], 
+                 minCorner[2], maxCorner[2], 
+                 Lv[1], Lv[2],
+                 dv[1], dv[2],
+                 xcv, xev,
+                 ycv, yev)
+    return obj
+end
+
+#function mesh(minCorner::Point{2,Float64}, maxCorner::Point{2,Float64}, ncells::Vector{Int64})::Mesh2D
+#    for i in 1:2
+#       @assert(minCorner[i] < maxCorner[i])
+#    end
+#    Lv = maxCorner .- minCorner
+#    dv = Lv ./ ncells
+#    xcv = LinRange(minCorner[1] + dv[1] / 2, maxCorner[1] - dv[1] / 2, ncells[1])
+#    ycv = LinRange(minCorner[2] + dv[2] / 2, maxCorner[2] - dv[2] / 2, ncells[2])
+#    xev = LinRange(minCorner[1], maxCorner[1], ncells[1]+1)
+#    yev = LinRange(minCorner[2], maxCorner[2], ncells[2]+1)
+#    obj = Mesh2D(3, 
+#                 ncells[1], ncells[2],
+#                 ncells[1]+1, ncells[2]+1,
+#                 minCorner[1], maxCorner[1], 
+#                 minCorner[2], maxCorner[2], 
+#                 Lv[1], Lv[2],
+#                 dv[1], dv[2],
+#                 xcv, xev,
+#                 ycv, yev)
+#    return obj
+#end
+
 
 function mesh(minCorner::SVector{3,Float64}, maxCorner::SVector{3,Float64}, ncells::SVector{3,Int64})::Mesh3D
     for i in 1:3
@@ -320,6 +510,26 @@ function mesh(minCorner::SVector{3,Float64}, maxCorner::SVector{3,Float64}, ncel
     return obj
 end
 
+function mesh(minCorner::SVector{3,Float64}, maxCorner::SVector{3,Float64}, ncells::SVector{3,Int64},
+              XV::Vector{Float64}, YV::Vector{Float64}, ZV::Vector{Float64},
+              dXV::Vector{Float64}, dYV::Vector{Float64}, dZV::Vector{Float64})::NonUniformMesh3D
+    for i in 1:3
+       @assert(minCorner[i] < maxCorner[i])
+    end
+    Lv = maxCorner .- minCorner
+    obj = NonUniformMesh3D(3, 
+                           ncells[1], ncells[2], ncells[3], 
+                           minCorner[1], maxCorner[1], 
+                           minCorner[2], maxCorner[2], 
+                           minCorner[3], maxCorner[3],
+                           Lv[1], Lv[2], Lv[3],
+                           dXV, dYV, dZV, 
+                           XV,
+                           YV,
+                           ZV)
+    return obj
+end
+
 
 #######################################
 ###
@@ -327,12 +537,50 @@ end
 ###
 #######################################
 
+mutable struct StretchedChannelGrid
+   mesh :: NonUniformMesh3D
+
+   U :: Array{Float32}
+   V :: Array{Float32}
+   W :: Array{Float32}
+end
+
 mutable struct ChannelGrid
    mesh :: Mesh3D
 
    U :: Array{Float32}
    V :: Array{Float32}
    W :: Array{Float32}
+end
+
+function read_field(fn::String, step::Int64, ::Type{StretchedChannelGrid})::StretchedChannelGrid
+   # Read mesh info
+   Ls,nx,ny,nz,xv,yv,zv=read_mesh(fn) 
+   # Read velocity field
+   fn_vel=fn*"/velocity/velocity."*string(step,pad=6)
+   U,V,W = read_vel(fn_vel,nx,ny,nz) 
+   
+   # Convert to doubles
+   nxDP=Int64(nx)
+   nyDP=Int64(ny)
+   nzDP=Int64(nz)
+   LsDP=Float64.(Ls)
+
+   minCorner=SVector{3,Float64}([LsDP[1], LsDP[3], LsDP[5]])
+   maxCorner=SVector{3,Float64}([LsDP[2], LsDP[4], LsDP[6]])
+   nCells=SVector{3,Int64}([nxDP,nyDP,nzDP])
+
+   xvd=0.5*Float64.(xv[1:end-1] + xv[2:end])
+   yvd=0.5*Float64.(yv[1:end-1] + yv[2:end])
+   zvd=0.5*Float64.(zv[1:end-1] + zv[2:end])
+
+   dx=Float64.(xv[2:end]-xv[1:end-1])
+   dy=Float64.(yv[2:end]-yv[1:end-1])
+   dz=Float64.(zv[2:end]-zv[1:end-1])
+
+   obj = StretchedChannelGrid(mesh(minCorner,maxCorner,nCells,xvd,yvd,zvd,dx,dy,dz),
+                     U, V, W)
+   return obj
 end
 
 function read_field(fn::String, step::Int64, ::Type{ChannelGrid})::ChannelGrid
@@ -352,7 +600,11 @@ function read_field(fn::String, step::Int64, ::Type{ChannelGrid})::ChannelGrid
    maxCorner=SVector{3,Float64}([LsDP[2], LsDP[4], LsDP[6]])
    nCells=SVector{3,Int64}([nxDP,nyDP,nzDP])
 
-   obj = ChannelGrid(mesh(minCorner,maxCorner,nCells), 
+   xvd=Float64.(xv)
+   yvd=Float64.(yv)
+   zvd=Float64.(zv)
+
+   obj = StretchedChannelGrid(mesh(minCorner,maxCorner,nCells,xvd,yvd,zvd),
                      U, V, W)
    return obj
 end
@@ -413,6 +665,13 @@ function read_mesh(fn::String)
    return lengths,nx, ny, nz, xv, yv, zv 
 end
 
-
-
-
+function read_P(fn::String, nx::Int32, ny::Int32, nz::Int32)::Array{Float32}
+    """
+    Reads pressure... what else do you want from me?
+    """
+    arr = Array{Float32}(undef, (nx,ny,nz))
+    io = open(fn)
+    skip(io, 244)
+    read!(io, arr); close(io)
+    return arr
+end
