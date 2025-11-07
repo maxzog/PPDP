@@ -1,5 +1,6 @@
 
 const ThreeVec{T} = SVector{3,T}
+const SixVec{T} = SVector{6,T}
 const ThreeMat{T} = SMatrix{3,3,T}
 
 abstract type Particle end
@@ -59,6 +60,35 @@ mutable struct ChnlPartEns<:Particle
     pos::ThreeVec{Float32}
     vel::ThreeVec{Float32}
     fld::ThreeVec{Float32}
+end
+
+mutable struct iCRWPartEns<:Particle
+    # 64 bit integers
+    id::Int64
+
+    # 32 bit floats
+    alpha::Float32
+
+    # 32 bit float vecs
+    pos::ThreeVec{Float32}
+    vel::ThreeVec{Float32}
+    fld::ThreeVec{Float32}
+    us ::ThreeVec{Float32}
+end
+
+mutable struct AprioriPartEns<:Particle
+    # 64 bit integers
+    id::Int64
+
+    # 32 bit floats
+    alpha::Float32
+
+    # Vectors of 32 bit floats
+    pos::ThreeVec{Float32}
+    vel::ThreeVec{Float32}
+    fld::ThreeVec{Float32}
+    us ::ThreeVec{Float32}
+    tau::SixVec{Float32}
 end
 
 function read_particles(fn::String, ::Type{ChnlPartFull})
@@ -241,6 +271,45 @@ function read_particles(dir::String, step::Int64, ::Type{ChnlPartEns})
     end
     perm = sortperm([p.id0 for p in ps])
     assign_groups!(ps)
+    return ps[perm]
+end
+
+function read_particles(dir::String, step::Int64, ::Type{iCRWPartEns})
+    suf = "."*"0"^(6-length(string(step)))*string(step)
+    np = get_npart(dir*"/particle"*suf)
+    X  = read_pos(dir*"/particle"*suf, np)
+    U  = read_arr(dir*"/fld"*suf, np)
+    V  = read_arr(dir*"/vel"*suf, np)
+    Us = read_arr(dir*"/uf"*suf, np)
+    ids= read_vec(dir*"/id"*suf, np)
+    as = read_vec(dir*"/alpha"*suf, np)
+    ps = Vector{iCRWPartEns}(undef, np)
+    for i in 1:np
+       ps[i] = iCRWPartEns(trunc(Int64, ids[i]), as[i], X[:,i], V[:,i], U[:,i], Us[:,i])
+    end
+    perm = sortperm([p.id for p in ps])
+    return ps[perm]
+end
+
+function read_particles(dir::String, step::Int64, ::Type{AprioriPartEns})
+    suf = "."*"0"^(6-length(string(step)))*string(step)
+    np = get_npart(dir*"/particle"*suf)
+    X  = read_pos(dir*"/particle"*suf, np)
+    U  = read_arr(dir*"/fld"*suf, np)
+    V  = read_arr(dir*"/vel"*suf, np)
+    Us = read_arr(dir*"/uf"*suf, np)
+    tds= read_arr(dir*"/tauRd"*suf, np)
+    tos= read_arr(dir*"/tauRo"*suf, np)
+    ids= read_vec(dir*"/id"*suf, np)
+    as = read_vec(dir*"/alpha"*suf, np)
+    ps = Vector{AprioriPartEns}(undef, np)
+    for i in 1:np
+       tau=Array{Float32}(undef, 6)
+       tau[1:3]=tds[:,i]
+       tau[4:6]=tos[:,i]
+       ps[i] = AprioriPartEns(trunc(Int64, ids[i]), as[i], X[:,i], V[:,i], U[:,i], Us[:,i], tau)
+    end
+    perm = sortperm([p.id for p in ps])
     return ps[perm]
 end
 
@@ -545,12 +614,122 @@ mutable struct StretchedChannelGrid
    W :: Array{Float32}
 end
 
+mutable struct SubgridModelGrid 
+   mesh :: NonUniformMesh3D
+
+   U :: Array{Float32}
+   V :: Array{Float32}
+   W :: Array{Float32}
+
+   tau11 :: Array{Float32}
+   tau22 :: Array{Float32}
+   tau33 :: Array{Float32}
+   tau12 :: Array{Float32}
+   tau23 :: Array{Float32}
+   tau13 :: Array{Float32}
+
+   dTdX :: Array{Float32}
+   dTdY :: Array{Float32}
+   dTdZ :: Array{Float32}
+end
+
+mutable struct SubgridModelNoDivGrid 
+   mesh :: NonUniformMesh3D
+
+   U :: Array{Float32}
+   V :: Array{Float32}
+   W :: Array{Float32}
+
+   tau11 :: Array{Float32}
+   tau22 :: Array{Float32}
+   tau33 :: Array{Float32}
+   tau12 :: Array{Float32}
+   tau23 :: Array{Float32}
+   tau13 :: Array{Float32}
+end
+
+mutable struct HITGrid
+   mesh :: NonUniformMesh3D
+
+   U :: Array{Float32}
+   V :: Array{Float32}
+   W :: Array{Float32}
+end
+
 mutable struct ChannelGrid
    mesh :: Mesh3D
 
    U :: Array{Float32}
    V :: Array{Float32}
    W :: Array{Float32}
+end
+
+mutable struct GeneralGrid
+   mesh :: NonUniformMesh3D
+
+   U :: Array{Float32}
+   V :: Array{Float32}
+   W :: Array{Float32}
+end
+
+function read_field(fn::String, step::Int64, ::Type{GeneralGrid})::GeneralGrid
+   # Read mesh info
+   Ls,nx,ny,nz,xv,yv,zv=read_mesh(fn) 
+   # Read velocity field
+   fn_vel=fn*"/velocity/velocity."*string(step,pad=6)
+   U,V,W = read_vel(fn_vel,nx,ny,nz) 
+   
+   # Convert to doubles
+   nxDP=Int64(nx)
+   nyDP=Int64(ny)
+   nzDP=Int64(nz)
+   LsDP=Float64.(Ls)
+
+   minCorner=SVector{3,Float64}([LsDP[1], LsDP[3], LsDP[5]])
+   maxCorner=SVector{3,Float64}([LsDP[2], LsDP[4], LsDP[6]])
+   nCells=SVector{3,Int64}([nxDP,nyDP,nzDP])
+
+   xvd=0.5*Float64.(xv[1:end-1] + xv[2:end])
+   yvd=0.5*Float64.(yv[1:end-1] + yv[2:end])
+   zvd=0.5*Float64.(zv[1:end-1] + zv[2:end])
+
+   dx=Float64.(xv[2:end]-xv[1:end-1])
+   dy=Float64.(yv[2:end]-yv[1:end-1])
+   dz=Float64.(zv[2:end]-zv[1:end-1])
+
+   obj = GeneralGrid(mesh(minCorner,maxCorner,nCells,xvd,yvd,zvd,dx,dy,dz),
+                     U, V, W)
+   return obj
+end
+
+function read_field(fn::String, step::Int64, ::Type{HITGrid})::HITGrid
+   # Read mesh info
+   Ls,nx,ny,nz,xv,yv,zv=read_mesh(fn) 
+   # Read velocity field
+   fn_vel=fn*"/velocity/velocity."*string(step,pad=6)
+   U,V,W = read_vel(fn_vel,nx,ny,nz) 
+   
+   # Convert to doubles
+   nxDP=Int64(nx)
+   nyDP=Int64(ny)
+   nzDP=Int64(nz)
+   LsDP=Float64.(Ls)
+
+   minCorner=SVector{3,Float64}([LsDP[1], LsDP[3], LsDP[5]])
+   maxCorner=SVector{3,Float64}([LsDP[2], LsDP[4], LsDP[6]])
+   nCells=SVector{3,Int64}([nxDP,nyDP,nzDP])
+
+   xvd=0.5*Float64.(xv[1:end-1] + xv[2:end])
+   yvd=0.5*Float64.(yv[1:end-1] + yv[2:end])
+   zvd=0.5*Float64.(zv[1:end-1] + zv[2:end])
+
+   dx=Float64.(xv[2:end]-xv[1:end-1])
+   dy=Float64.(yv[2:end]-yv[1:end-1])
+   dz=Float64.(zv[2:end]-zv[1:end-1])
+
+   obj = HITGrid(mesh(minCorner,maxCorner,nCells,xvd,yvd,zvd,dx,dy,dz),
+                     U, V, W)
+   return obj
 end
 
 function read_field(fn::String, step::Int64, ::Type{StretchedChannelGrid})::StretchedChannelGrid
@@ -580,6 +759,76 @@ function read_field(fn::String, step::Int64, ::Type{StretchedChannelGrid})::Stre
 
    obj = StretchedChannelGrid(mesh(minCorner,maxCorner,nCells,xvd,yvd,zvd,dx,dy,dz),
                      U, V, W)
+   return obj
+end
+
+function read_field(fn::String, step::Int64, ::Type{SubgridModelGrid})::SubgridModelGrid
+   # Read mesh info
+   Ls,nx,ny,nz,xv,yv,zv=read_mesh(fn) 
+   # Read velocity field
+   fn_vel=fn*"/velocity/velocity."*string(step,pad=6)
+   U,V,W = read_vel(fn_vel,nx,ny,nz) 
+   fn_Tii=fn*"/tau_ii/tau_ii."*string(step,pad=6)
+   T11,T22,T33 = read_vel(fn_Tii,nx,ny,nz) 
+   fn_Tij=fn*"/tau_ij/tau_ij."*string(step,pad=6)
+   T12,T23,T13 = read_vel(fn_Tij,nx,ny,nz) 
+   fn_dTd=fn*"/dtau/dtau."*string(step,pad=6)
+   dTx,dTy,dTz = read_vel(fn_dTd,nx,ny,nz) 
+   
+   # Convert to doubles
+   nxDP=Int64(nx)
+   nyDP=Int64(ny)
+   nzDP=Int64(nz)
+   LsDP=Float64.(Ls)
+
+   minCorner=SVector{3,Float64}([LsDP[1], LsDP[3], LsDP[5]])
+   maxCorner=SVector{3,Float64}([LsDP[2], LsDP[4], LsDP[6]])
+   nCells=SVector{3,Int64}([nxDP,nyDP,nzDP])
+
+   xvd=0.5*Float64.(xv[1:end-1] + xv[2:end])
+   yvd=0.5*Float64.(yv[1:end-1] + yv[2:end])
+   zvd=0.5*Float64.(zv[1:end-1] + zv[2:end])
+
+   dx=Float64.(xv[2:end]-xv[1:end-1])
+   dy=Float64.(yv[2:end]-yv[1:end-1])
+   dz=Float64.(zv[2:end]-zv[1:end-1])
+
+   obj = SubgridModelGrid(mesh(minCorner,maxCorner,nCells,xvd,yvd,zvd,dx,dy,dz),
+                     U, V, W, T11, T22, T33, T12, T23, T13, dTx, dTy, dTz)
+   return obj
+end
+
+function read_field(fn::String, step::Int64, ::Type{SubgridModelNoDivGrid})::SubgridModelNoDivGrid
+   # Read mesh info
+   Ls,nx,ny,nz,xv,yv,zv=read_mesh(fn) 
+   # Read velocity field
+   fn_vel=fn*"/velocity/velocity."*string(step,pad=6)
+   U,V,W = read_vel(fn_vel,nx,ny,nz) 
+   fn_Tii=fn*"/tau_ii/tau_ii."*string(step,pad=6)
+   T11,T22,T33 = read_vel(fn_Tii,nx,ny,nz) 
+   fn_Tij=fn*"/tau_ij/tau_ij."*string(step,pad=6)
+   T12,T23,T13 = read_vel(fn_Tij,nx,ny,nz) 
+   
+   # Convert to doubles
+   nxDP=Int64(nx)
+   nyDP=Int64(ny)
+   nzDP=Int64(nz)
+   LsDP=Float64.(Ls)
+
+   minCorner=SVector{3,Float64}([LsDP[1], LsDP[3], LsDP[5]])
+   maxCorner=SVector{3,Float64}([LsDP[2], LsDP[4], LsDP[6]])
+   nCells=SVector{3,Int64}([nxDP,nyDP,nzDP])
+
+   xvd=0.5*Float64.(xv[1:end-1] + xv[2:end])
+   yvd=0.5*Float64.(yv[1:end-1] + yv[2:end])
+   zvd=0.5*Float64.(zv[1:end-1] + zv[2:end])
+
+   dx=Float64.(xv[2:end]-xv[1:end-1])
+   dy=Float64.(yv[2:end]-yv[1:end-1])
+   dz=Float64.(zv[2:end]-zv[1:end-1])
+
+   obj = SubgridModelNoDivGrid(mesh(minCorner,maxCorner,nCells,xvd,yvd,zvd,dx,dy,dz),
+                           U, V, W, T11, T22, T33, T12, T23, T13) 
    return obj
 end
 
