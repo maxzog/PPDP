@@ -91,6 +91,17 @@ mutable struct AprioriPartEns<:Particle
     tau::SixVec{Float32}
 end
 
+mutable struct SmagPartEns<:Particle
+    # 64 bit integers
+    id::Int64
+
+    # Vectors of 32 bit floats
+    pos::ThreeVec{Float32}
+    vel::ThreeVec{Float32}
+    Lij::SixVec{Float32}
+    Mij::SixVec{Float32}
+end
+
 function read_particles(fn::String, ::Type{ChnlPartFull})
     # Open the binary file
     io = open(fn, "r")
@@ -308,6 +319,30 @@ function read_particles(dir::String, step::Int64, ::Type{AprioriPartEns})
        tau[1:3]=tds[:,i]
        tau[4:6]=tos[:,i]
        ps[i] = AprioriPartEns(trunc(Int64, ids[i]), as[i], X[:,i], V[:,i], U[:,i], Us[:,i], tau)
+    end
+    perm = sortperm([p.id for p in ps])
+    return ps[perm]
+end
+
+function read_particles(dir::String, step::Int64, ::Type{SmagPartEns})
+    suf = "."*"0"^(6-length(string(step)))*string(step)
+    np = get_npart(dir*"/particle"*suf)
+    X  = read_pos(dir*"/particle"*suf, np)
+    V  = read_arr(dir*"/vel"*suf, np)
+    Mijds= read_arr(dir*"/Mij1to3"*suf, np)
+    Mijos= read_arr(dir*"/Mij4to6"*suf, np)
+    Lijds= read_arr(dir*"/Lij1to3"*suf, np)
+    Lijos= read_arr(dir*"/Lij4to6"*suf, np)
+    ids= read_vec(dir*"/id"*suf, np)
+    ps = Vector{SmagPartEns}(undef, np)
+    for i in 1:np
+       Mij=Array{Float32}(undef, 6)
+       Lij=Array{Float32}(undef, 6)
+       Mij[1:3]=Mijds[:,i]
+       Mij[4:6]=Mijos[:,i]
+       Lij[1:3]=Lijds[:,i]
+       Lij[4:6]=Lijos[:,i]
+       ps[i] = SmagPartEns(trunc(Int64, ids[i]), X[:,i], V[:,i], Lij, Mij) 
     end
     perm = sortperm([p.id for p in ps])
     return ps[perm]
