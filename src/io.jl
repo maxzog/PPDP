@@ -91,17 +91,6 @@ mutable struct AprioriPartEns<:Particle
     tau::SixVec{Float32}
 end
 
-mutable struct SmagPartEns<:Particle
-    # 64 bit integers
-    id::Int64
-
-    # Vectors of 32 bit floats
-    pos::ThreeVec{Float32}
-    vel::ThreeVec{Float32}
-    Lij::SixVec{Float32}
-    Mij::SixVec{Float32}
-end
-
 function read_particles(fn::String, ::Type{ChnlPartFull})
     # Open the binary file
     io = open(fn, "r")
@@ -319,30 +308,6 @@ function read_particles(dir::String, step::Int64, ::Type{AprioriPartEns})
        tau[1:3]=tds[:,i]
        tau[4:6]=tos[:,i]
        ps[i] = AprioriPartEns(trunc(Int64, ids[i]), as[i], X[:,i], V[:,i], U[:,i], Us[:,i], tau)
-    end
-    perm = sortperm([p.id for p in ps])
-    return ps[perm]
-end
-
-function read_particles(dir::String, step::Int64, ::Type{SmagPartEns})
-    suf = "."*"0"^(6-length(string(step)))*string(step)
-    np = get_npart(dir*"/particle"*suf)
-    X  = read_pos(dir*"/particle"*suf, np)
-    V  = read_arr(dir*"/vel"*suf, np)
-    Mijds= read_arr(dir*"/Mij1to3"*suf, np)
-    Mijos= read_arr(dir*"/Mij4to6"*suf, np)
-    Lijds= read_arr(dir*"/Lij1to3"*suf, np)
-    Lijos= read_arr(dir*"/Lij4to6"*suf, np)
-    ids= read_vec(dir*"/id"*suf, np)
-    ps = Vector{SmagPartEns}(undef, np)
-    for i in 1:np
-       Mij=Array{Float32}(undef, 6)
-       Lij=Array{Float32}(undef, 6)
-       Mij[1:3]=Mijds[:,i]
-       Mij[4:6]=Mijos[:,i]
-       Lij[1:3]=Lijds[:,i]
-       Lij[4:6]=Lijos[:,i]
-       ps[i] = SmagPartEns(trunc(Int64, ids[i]), X[:,i], V[:,i], Lij, Mij) 
     end
     perm = sortperm([p.id for p in ps])
     return ps[perm]
@@ -958,4 +923,77 @@ function read_P(fn::String, nx::Int32, ny::Int32, nz::Int32)::Array{Float32}
     skip(io, 244)
     read!(io, arr); close(io)
     return arr
+end
+
+#######################################
+###
+### Dynamic field grid
+###
+#######################################
+
+struct EnsightField
+    mesh  :: NonUniformMesh3D
+    fields:: NamedTuple
+end
+
+function Base.getproperty(f::EnsightField, s::Symbol)
+    s === :mesh   && return getfield(f, :mesh)
+    s === :fields && return getfield(f, :fields)
+    return getfield(f, :fields)[s]
+end
+
+Base.propertynames(f::EnsightField, private::Bool=false) =
+    (:mesh, keys(getfield(f, :fields))...)
+
+# Auto-detect scalar vs. vector field from file size.
+# Scalar → Array{Float32}(nx,ny,nz)
+# Vector → Array{Float32}(3,nx,ny,nz)
+function _read_ensight_field(fn::String, nx::Int32, ny::Int32, nz::Int32)
+    n  = Int(nx) * Int(ny) * Int(nz)
+    nb = filesize(fn) - 244
+    if nb == 3 * n * sizeof(Float32)
+        U, V, W = read_vel(fn, nx, ny, nz)
+        arr = Array{Float32}(undef, 3, nx, ny, nz)
+        arr[1,:,:,:] .= U
+        arr[2,:,:,:] .= V
+        arr[3,:,:,:] .= W
+        return arr
+    elseif nb == n * sizeof(Float32)
+        return read_P(fn, nx, ny, nz)
+    else
+        error("[read_field] Cannot determine scalar/vector type from file size: $fn")
+    end
+end
+
+"""
+    read_field(fn, step, :U, :V, :W, :P, :vf, ...)
+
+Read an arbitrary set of Ensight fields into an `EnsightField` object.
+Each symbol must match a subdirectory name in `fn`.  Access loaded data as
+`field.U`, `field.P`, etc.  Scalar fields are returned as `Array{Float32}(nx,ny,nz)`;
+vector fields (files containing three components) as `Array{Float32}(3,nx,ny,nz)`.
+"""
+function read_field(fn::String, step::Int64, field_names::Symbol...)::EnsightField
+    Ls, nx, ny, nz, xv, yv, zv = read_mesh(fn)
+
+    nxDP = Int64(nx); nyDP = Int64(ny); nzDP = Int64(nz)
+    LsDP = Float64.(Ls)
+    minCorner = SVector{3,Float64}([LsDP[1], LsDP[3], LsDP[5]])
+    maxCorner = SVector{3,Float64}([LsDP[2], LsDP[4], LsDP[6]])
+    nCells    = SVector{3,Int64}([nxDP, nyDP, nzDP])
+    xvd = 0.5 .* Float64.(xv[1:end-1] .+ xv[2:end])
+    yvd = 0.5 .* Float64.(yv[1:end-1] .+ yv[2:end])
+    zvd = 0.5 .* Float64.(zv[1:end-1] .+ zv[2:end])
+    dx  = Float64.(xv[2:end] .- xv[1:end-1])
+    dy  = Float64.(yv[2:end] .- yv[1:end-1])
+    dz  = Float64.(zv[2:end] .- zv[1:end-1])
+    m   = mesh(minCorner, maxCorner, nCells, xvd, yvd, zvd, dx, dy, dz)
+
+    pairs = map(field_names) do name
+        sname    = String(name)
+        field_fn = fn * "/" * sname * "/" * sname * "." * string(step, pad=6)
+        name => _read_ensight_field(field_fn, nx, ny, nz)
+    end
+
+    return EnsightField(m, NamedTuple(pairs))
 end
